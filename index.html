@@ -1,0 +1,749 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  ClipboardList,
+  MapPin,
+  Camera,
+  Save,
+  BarChart3,
+  Users,
+  Bike,
+  Car,
+  Footprints,
+  AlertTriangle,
+  Trash2,
+  CheckCircle2,
+  X,
+  Plus,
+  Minus,
+  ArrowRight,
+  ArrowLeft,
+  Image as ImageIcon,
+  FileArchive,
+  FileUp,
+  Loader2,
+  Lock,
+  LogOut,
+  ShieldCheck,
+  Navigation,
+  FileWarning,
+  Check,
+  Filter,
+  ArrowUpDown,
+  SortAsc,
+  SortDesc,
+  FileText,
+  Play,
+  Square
+} from 'lucide-react';
+
+// Firebase Imports
+import { initializeApp } from 'firebase/app';
+import {
+  getAuth,
+  signInAnonymously,
+  onAuthStateChanged,
+  signInWithCustomToken,
+  User
+} from 'firebase/auth';
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  onSnapshot,
+  serverTimestamp,
+  getDocs,
+  deleteDoc,
+  doc,
+  writeBatch
+} from 'firebase/firestore';
+import { getStorage, ref, uploadString, getDownloadURL } from 'firebase/storage';
+
+// --- Global Variable Declarations for Environment ---
+declare global {
+  var __firebase_config: string;
+  var __app_id: string;
+  var __initial_auth_token: string | undefined;
+  interface Window {
+    JSZip: any;
+    L: any;
+  }
+}
+
+// --- Leaflet Style Injection ---
+const injectLeafletAssets = () => {
+  if (!document.getElementById('leaflet-css')) {
+    const link = document.createElement('link');
+    link.id = 'leaflet-css';
+    link.rel = 'stylesheet';
+    link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    document.head.appendChild(link);
+  }
+  if (!document.getElementById('leaflet-js')) {
+    const script = document.createElement('script');
+    script.id = 'leaflet-js';
+    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    document.head.appendChild(script);
+  }
+};
+
+// --- Configuration & Initialization ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' 
+  ? JSON.parse(__firebase_config) 
+  : { apiKey: "dummy", authDomain: "dummy", projectId: "dummy" };
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+let storage: any;
+try {
+  storage = getStorage(app);
+} catch (e) {
+  console.warn("Firebase Storage 未設定", e);
+}
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Constants & Types ---
+const CITY_CODES = [
+  { code: 'A', name: '臺北市' },
+  { code: 'B', name: '臺中市' },
+  { code: 'C', name: '基隆市' },
+  { code: 'D', name: '臺南市' },
+  { code: 'E', name: '高雄市' },
+  { code: 'F', name: '新北市' },
+  { code: 'G', name: '宜蘭縣' },
+  { code: 'H', name: '桃園市' },
+  { code: 'I', name: '嘉義市' },
+  { code: 'J', name: '新竹縣' },
+  { code: 'K', name: '苗栗縣' },
+  { code: 'M', name: '南投縣' },
+  { code: 'N', name: '彰化縣' },
+  { code: 'O', name: '新竹市' },
+  { code: 'P', name: '雲林縣' },
+  { code: 'Q', name: '嘉義縣' },
+  { code: 'T', name: '屏東縣' },
+  { code: 'U', name: '花蓮縣' },
+  { code: 'V', name: '臺東縣' },
+  { code: 'W', name: '金門縣' },
+  { code: 'X', name: '澎湖縣' },
+  { code: 'Y', name: '陽明山' },
+  { code: 'Z', name: '連江縣' },
+];
+
+const LOGO_URL = "不落蒂大圖.jpg";
+
+interface Hotspot {
+  id: string;
+  address: string;
+  count: number;
+  note: string;
+}
+
+interface ScreeningData {
+  id?: string;
+  recordId: string;
+  date: string;
+  cityCode: string;
+  recorderName: string;
+  screenerName: string;
+  photographerName: string;
+  startAddress: string;
+  endAddress: string;
+  direction: 'right' | 'left';
+  screenedCount: number;
+  actualPickedCount: number;
+  boxCount: number;
+  drainCount: number;
+  note: string;
+  photoCount: number;
+  images: string[];
+  path?: {lat: number, lng: number, timestamp: number}[];
+  distance?: number;
+  hotspots: Hotspot[];
+  method: 'walk' | 'bike' | 'motor';
+  roadType: 'complex' | 'normal' | 'road_only';
+  userId: string;
+  createdAt: any;
+}
+
+type SortField = 'date' | 'actualPickedCount' | 'screenedCount' | 'recordId';
+type SortDirection = 'asc' | 'desc';
+
+interface FilterState {
+  city: string;
+  dateStart: string;
+  dateEnd: string;
+  address: string;
+  recordId: string;
+  personnel: string;
+}
+
+interface SortState {
+  field: SortField;
+  direction: SortDirection;
+}
+
+// --- Utils ---
+const resizeImage = (file: File): Promise<string> => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 600;
+        const scaleSize = MAX_WIDTH / img.width;
+        const width = scaleSize < 1 ? MAX_WIDTH : img.width;
+        const height = scaleSize < 1 ? img.height * scaleSize : img.height;
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+        resolve(dataUrl);
+      };
+    };
+  });
+};
+
+const loadJSZip = (): Promise<any> => {
+  return new Promise((resolve, reject) => {
+    if (window.JSZip) { resolve(window.JSZip); return; }
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+    script.onload = () => resolve((window as any).JSZip);
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+};
+
+const parseCSV = (text: string) => {
+  const rows: string[][] = [];
+  let currentRow: string[] = [];
+  let currentVal = '';
+  let inQuote = false;
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+    if (char === '"') {
+      if (inQuote && nextChar === '"') { currentVal += '"'; i++; }
+      else inQuote = !inQuote;
+    } else if (char === ',' && !inQuote) {
+      currentRow.push(currentVal);
+      currentVal = '';
+    } else if ((char === '\r' || char === '\n') && !inQuote) {
+      if (char === '\r' && nextChar === '\n') i++;
+      currentRow.push(currentVal);
+      if (currentRow.length > 1 || (currentRow.length === 1 && currentRow[0] !== '')) rows.push(currentRow);
+      currentRow = [];
+      currentVal = '';
+    } else currentVal += char;
+  }
+  if (currentVal || currentRow.length > 0) { currentRow.push(currentVal); rows.push(currentRow); }
+  return rows;
+};
+
+const calcDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const R = 6371e3;
+  const p1 = lat1 * Math.PI/180;
+  const p2 = lat2 * Math.PI/180;
+  const dp = (lat2-lat1) * Math.PI/180;
+  const dl = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(dp/2) * Math.sin(dp/2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+};
+
+// --- Helper UI Components ---
+const InputText = ({ label, name, value, onChange, placeholder, required }: any) => (
+  <div>
+    <label className="block text-xs font-medium text-slate-500 mb-1">{label} {required && <span className="text-red-500">*</span>}</label>
+    <input type="text" name={name} value={value} onChange={onChange} placeholder={placeholder} className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all" />
+  </div>
+);
+
+const SelectionCard = ({ selected, onClick, title, subtitle, icon, smallText }: any) => (
+  <button type="button" onClick={onClick} className={`relative flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all duration-200 ${selected ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-slate-100 bg-white text-slate-500 hover:border-emerald-200'}`}>
+    {icon && <div className="mb-2">{icon}</div>}
+    <div className={`${smallText ? 'text-xs' : 'text-sm'} font-bold`}>{title}</div>
+    {subtitle && <div className="text-[10px] opacity-75 mt-1">{subtitle}</div>}
+    {selected && <div className="absolute top-1 right-1"><CheckCircle2 className="w-4 h-4 text-emerald-500" /></div>}
+  </button>
+);
+
+const CounterInput = ({ label, value, onChange, colorClass = "text-emerald-600", bgClass = "bg-emerald-50", btnClass = "bg-emerald-100 text-emerald-700" }: any) => {
+  return (
+    <div className={`flex flex-col items-center p-4 rounded-xl border border-slate-100 ${bgClass}`}>
+      <span className="text-xl font-bold text-slate-700 mb-4">{label}</span>
+      <div className="flex items-center gap-2 w-full justify-center">
+        <button type="button" onClick={() => value > 0 && onChange(value - 1)} disabled={value <= 0} className="w-[100px] h-[60px] rounded-xl flex items-center justify-center transition-active active:scale-95 disabled:opacity-30 bg-white border border-slate-200 text-slate-500 shadow-sm"><Minus /></button>
+        <input type="number" value={value} onChange={(e) => onChange(parseInt(e.target.value) || 0)} className={`w-20 text-center text-3xl font-bold bg-transparent outline-none ${colorClass}`} />
+        <button type="button" onClick={() => onChange(value + 1)} className={`w-[100px] h-[60px] rounded-xl flex items-center justify-center transition-active active:scale-95 shadow-sm ${btnClass}`}><Plus /></button>
+      </div>
+    </div>
+  );
+};
+
+// --- Map Component (Leaflet) ---
+const LeafletMap = ({ path, isTracking, height = "250px" }: { path: {lat: number, lng: number}[], isTracking?: boolean, height?: string }) => {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<any>(null);
+  const polylineRef = useRef<any>(null);
+  const markersRef = useRef<any[]>([]);
+
+  useEffect(() => {
+    if (!window.L || !mapContainerRef.current) return;
+
+    if (!mapRef.current) {
+      // Initialize map
+      const initialPos = path.length > 0 ? [path[0].lat, path[0].lng] : [24.676, 121.767]; // Default Luodong
+      mapRef.current = window.L.map(mapContainerRef.current, {
+        zoomControl: false,
+        attributionControl: false
+      }).setView(initialPos, 16);
+
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapRef.current);
+      polylineRef.current = window.L.polyline([], { color: '#059669', weight: 4 }).addTo(mapRef.current);
+    }
+
+    // Update Polyline
+    const latLngs = path.map(p => [p.lat, p.lng]);
+    polylineRef.current.setLatLngs(latLngs);
+
+    // Update Markers (Start/End)
+    markersRef.current.forEach(m => m.remove());
+    markersRef.current = [];
+
+    if (path.length > 0) {
+      // Start Marker
+      const startMarker = window.L.circleMarker([path[0].lat, path[0].lng], {
+        radius: 6, color: '#FFF', fillColor: '#22c55e', fillOpacity: 1, weight: 2
+      }).addTo(mapRef.current);
+      markersRef.current.push(startMarker);
+
+      // End/Current Marker
+      if (path.length > 1) {
+        const endMarker = window.L.circleMarker([path[path.length - 1].lat, path[path.length - 1].lng], {
+          radius: 6, color: '#FFF', fillColor: isTracking ? '#3b82f6' : '#ef4444', fillOpacity: 1, weight: 2
+        }).addTo(mapRef.current);
+        markersRef.current.push(endMarker);
+      }
+
+      // Auto Pan if tracking
+      if (isTracking && path.length > 0) {
+        mapRef.current.panTo([path[path.length - 1].lat, path[path.length - 1].lng]);
+      } else if (path.length > 1) {
+        mapRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [20, 20] });
+      }
+    }
+
+    return () => {
+      // Cleanup happens only when component unmounts, but we keep the map reference for updates
+    };
+  }, [path, isTracking]);
+
+  return <div ref={mapContainerRef} style={{ height }} className="w-full rounded-xl border border-slate-200 shadow-inner z-0 overflow-hidden" />;
+};
+
+// 1. Splash / Login Screen
+const LoginScreen = ({ onLogin }: { onLogin: () => void }) => {
+  const [imageError, setImageError] = useState(false);
+  const [status, setStatus] = useState<'idle' | 'requesting' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState('');
+  
+  const handleStart = () => {
+    setStatus('requesting');
+    if (!navigator.geolocation) {
+      setErrorMsg("您的裝置不支援 GPS 定位。");
+      setStatus('error');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      () => { setTimeout(() => onLogin(), 600); },
+      (error) => {
+        let msg = "定位失敗";
+        if (error.code === 1) msg = "您已拒絕定位權限。";
+        else if (error.code === 2) msg = "無法偵測位置。";
+        setErrorMsg(msg);
+        setStatus('error');
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  };
+  
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-emerald-50 p-6 text-center">
+      {status === 'error' && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6">
+          <div className="bg-white rounded-2xl p-6 shadow-2xl max-w-sm w-full">
+            <MapPin className="w-12 h-12 text-red-500 mx-auto mb-4" />
+            <h3 className="text-xl font-bold mb-2">無法取得位置</h3>
+            <p className="text-slate-600 mb-6 text-sm">{errorMsg}</p>
+            <button onClick={handleStart} className="w-full py-3 rounded-xl bg-emerald-600 text-white font-bold mb-2">再試一次</button>
+            <button onClick={onLogin} className="w-full py-3 rounded-xl bg-slate-100 text-slate-500 font-bold">仍要進入 (無GPS)</button>
+          </div>
+        </div>
+      )}
+      <div className={`w-28 h-28 rounded-full flex items-center justify-center mb-6 shadow-xl overflow-hidden p-4 ${imageError ? 'bg-emerald-600' : 'bg-white'}`}>
+         {!imageError ? <img src={LOGO_URL} alt="Logo" className="w-full h-full object-contain" onError={() => setImageError(true)} /> : <ClipboardList className="w-12 h-12 text-white" />}
+      </div>
+      <h1 className="text-3xl font-bold text-slate-800 mb-2">菸蒂快篩公民科學</h1>
+      <p className="text-slate-600 mb-8 max-w-sm">杜絕菸害，不留餘地。</p>
+      <button onClick={handleStart} disabled={status === 'requesting'} className="bg-emerald-600 text-white font-bold py-3 px-8 rounded-full shadow-md transition-all flex items-center gap-2">
+        {status === 'requesting' ? <><Loader2 className="animate-spin w-5 h-5" /> 請求定位中...</> : <><Navigation className="w-5 h-5" /> 開啟定位並進入</>}
+      </button>
+    </div>
+  );
+};
+
+// 2. Data Entry Form
+const ScreeningForm = ({ user, onSubmitSuccess }: { user: User, onSubmitSuccess: () => void }) => {
+  const [loading, setLoading] = useState(false);
+  const [loadingText, setLoadingText] = useState("上傳中...");
+  const [modal, setModal] = useState({ show: false, title: '', content: '' });
+  
+  const [isTracking, setIsTracking] = useState(false);
+  const [path, setPath] = useState<{lat: number, lng: number, timestamp: number}[]>([]);
+  const [distance, setDistance] = useState(0);
+  const trackingRef = useRef<number | null>(null);
+  
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
+  const [previewImages, setPreviewImages] = useState<string[]>([]);
+  
+  const [formData, setFormData] = useState({
+    date: new Date().toISOString().split('T')[0],
+    cityCode: 'G',
+    recorderName: '',
+    screenerName: '',
+    photographerName: '',
+    startAddress: '',
+    endAddress: '',
+    direction: 'right' as 'right' | 'left',
+    screenedCount: 0,
+    actualPickedCount: 0,
+    boxCount: 0,
+    drainCount: 0,
+    note: '',
+    method: '' as '' | 'walk' | 'bike' | 'motor',
+    roadType: '' as '' | 'complex' | 'normal' | 'road_only',
+  });
+  
+  const [hotspots, setHotspots] = useState<Hotspot[]>([{ id: '1', address: '', count: 0, note: '' }]);
+
+  useEffect(() => {
+    let dist = 0;
+    for (let i = 1; i < path.length; i++) {
+      dist += calcDistance(path[i-1].lat, path[i-1].lng, path[i].lat, path[i].lng);
+    }
+    setDistance(dist);
+    if (path.length > 0) {
+      setFormData(prev => ({
+        ...prev,
+        startAddress: `${path[0].lat.toFixed(6)}, ${path[0].lng.toFixed(6)}`,
+        endAddress: `${path[path.length - 1].lat.toFixed(6)}, ${path[path.length - 1].lng.toFixed(6)}`
+      }));
+    }
+  }, [path]);
+
+  const toggleTracking = () => {
+    if (isTracking) {
+      setIsTracking(false);
+      if (trackingRef.current) clearInterval(trackingRef.current);
+    } else {
+      if (!navigator.geolocation) return;
+      setIsTracking(true);
+      setPath([]);
+      setDistance(0);
+      const fetchLoc = () => {
+        navigator.geolocation.getCurrentPosition(pos => {
+          setPath(prev => [...prev, { lat: pos.coords.latitude, lng: pos.coords.longitude, timestamp: Date.now() }]);
+        }, err => console.error(err), { enableHighAccuracy: true });
+      };
+      fetchLoc();
+      trackingRef.current = window.setInterval(fetchLoc, 5000) as any;
+    }
+  };
+
+  const handleInputChange = (e: any) => setFormData(p => ({ ...p, [e.target.name]: e.target.value }));
+
+  const handleSubmit = async (e: any) => {
+    e.preventDefault();
+    if (isTracking) {
+      setModal({ show: true, title: "提示", content: "請先結束定位再提交。" });
+      return;
+    }
+    if (!formData.recorderName || !formData.method || !formData.roadType) {
+      setModal({ show: true, title: "缺少資料", content: "請填寫紀錄人員、移動方式及路段型態。" });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const q = collection(db, 'artifacts', appId, 'public', 'data', 'screenings');
+      const snap = await getDocs(q);
+      let count = 0;
+      snap.forEach(d => { if (d.data().date === formData.date && d.data().cityCode === formData.cityCode) count++; });
+      const recordId = `${formData.cityCode}${formData.date.replace(/-/g, '')}-${String(count + 1).padStart(3, '0')}`;
+
+      const finalImages: string[] = [];
+      for (let i = 0; i < previewImages.length; i++) {
+        setLoadingText(`上傳圖片 (${i + 1}/${previewImages.length})`);
+        try {
+          const imageRef = ref(storage, `artifacts/${appId}/public/images/${recordId}_${i}.jpg`);
+          await uploadString(imageRef, previewImages[i], 'data_url');
+          finalImages.push(await getDownloadURL(imageRef));
+        } catch {
+          finalImages.push(previewImages[i]);
+        }
+      }
+
+      await addDoc(q, {
+        ...formData,
+        recordId,
+        userId: user.uid,
+        images: finalImages,
+        path,
+        distance,
+        hotspots: hotspots.filter(h => h.address),
+        createdAt: serverTimestamp()
+      });
+      setModal({ show: true, title: "上傳成功", content: `案件編號：${recordId}` });
+    } catch (err) {
+      console.error(err);
+      setModal({ show: true, title: "錯誤", content: "上傳失敗，請檢查網路。" });
+    } finally { setLoading(false); }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-6 pb-20">
+      {modal.show && (
+        <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center p-4">
+             <div className="bg-white p-6 rounded-2xl max-w-sm w-full">
+                 <h3 className="font-bold text-lg mb-2">{modal.title}</h3>
+                 <p className="text-slate-600 mb-6">{modal.content}</p>
+                 <button type="button" onClick={() => { setModal({ ...modal, show: false }); if (modal.title === "上傳成功") onSubmitSuccess(); }} className="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl">確定</button>
+             </div>
+        </div>
+      )}
+
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100">
+        <h2 className="text-lg font-bold text-slate-800 mb-4 border-b pb-2 flex items-center gap-2"><ClipboardList className="text-emerald-600" /> 基本資料</h2>
+        <div className="grid grid-cols-2 gap-4 mb-4">
+          <select name="cityCode" value={formData.cityCode} onChange={handleInputChange} className="p-2 bg-slate-50 border rounded-lg text-sm">
+            {CITY_CODES.map(c => <option key={c.code} value={c.code}>{c.code} - {c.name}</option>)}
+          </select>
+          <input type="date" name="date" value={formData.date} onChange={handleInputChange} className="p-2 bg-slate-50 border rounded-lg text-sm" />
+        </div>
+        <div className="space-y-3">
+          <InputText label="紀錄人員" name="recorderName" value={formData.recorderName} onChange={handleInputChange} required />
+          <InputText label="快篩人員" name="screenerName" value={formData.screenerName} onChange={handleInputChange} />
+        </div>
+      </div>
+
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100">
+        <h2 className="text-lg font-bold text-slate-800 mb-4 border-b pb-2 flex items-center gap-2"><MapPin className="text-emerald-600" /> 快篩軌跡定位</h2>
+        <div className="space-y-3">
+           <button type="button" onClick={toggleTracking} className={`w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${isTracking ? 'bg-red-100 text-red-600 animate-pulse' : 'bg-emerald-100 text-emerald-700'}`}>
+             {isTracking ? <><Square fill="currentColor" /> 結束定位</> : <><Play fill="currentColor" /> 開始定位</>}
+           </button>
+           <LeafletMap path={path} isTracking={isTracking} />
+           <div className="flex justify-between text-xs font-bold text-slate-500">
+              <span>座標點: {path.length}</span>
+              <span>總長: {distance.toFixed(1)} m</span>
+           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-4">
+          <SelectionCard selected={formData.direction === 'right'} onClick={() => setFormData(p => ({...p, direction: 'right'}))} title="右向 (順向)" icon={<ArrowRight />} />
+          <SelectionCard selected={formData.direction === 'left'} onClick={() => setFormData(p => ({...p, direction: 'left'}))} title="左向 (逆向)" icon={<ArrowLeft />} />
+        </div>
+      </div>
+
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100">
+        <h2 className="text-lg font-bold text-slate-800 mb-4 border-b pb-2 flex items-center gap-2"><Footprints className="text-emerald-600" /> 快篩方式</h2>
+        <div className="grid grid-cols-3 gap-2 mb-4">
+          <SelectionCard selected={formData.method === 'walk'} onClick={() => setFormData(p => ({...p, method: 'walk'}))} title="步行" icon={<Footprints />} />
+          <SelectionCard selected={formData.method === 'bike'} onClick={() => setFormData(p => ({...p, method: 'bike'}))} title="單車" icon={<Bike />} />
+          <SelectionCard selected={formData.method === 'motor'} onClick={() => setFormData(p => ({...p, method: 'motor'}))} title="機動車" icon={<Car />} />
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <SelectionCard smallText selected={formData.roadType === 'complex'} onClick={() => setFormData(p => ({...p, roadType: 'complex'}))} title="複雜" subtitle="(花圃)" />
+          <SelectionCard smallText selected={formData.roadType === 'normal'} onClick={() => setFormData(p => ({...p, roadType: 'normal'}))} title="普通" subtitle="(人行)" />
+          <SelectionCard smallText selected={formData.roadType === 'road_only'} onClick={() => setFormData(p => ({...p, roadType: 'road_only'}))} title="純馬路" />
+        </div>
+      </div>
+
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100">
+        <h2 className="text-lg font-bold text-slate-800 mb-4 border-b pb-2 flex items-center gap-2"><BarChart3 className="text-emerald-600" /> 數據統計</h2>
+        <div className="space-y-6">
+          <CounterInput label="快篩估計數量" value={formData.screenedCount} onChange={(v: any) => setFormData(p => ({...p, screenedCount: v}))} />
+          <CounterInput label="實際撿拾數量" value={formData.actualPickedCount} onChange={(v: any) => setFormData(p => ({...p, actualPickedCount: v}))} colorClass="text-blue-600" bgClass="bg-blue-50" btnClass="bg-blue-100 text-blue-700" />
+        </div>
+        <div className="mt-6 flex gap-3">
+          <button type="button" onClick={() => cameraInputRef.current?.click()} className="flex-1 py-3 bg-emerald-50 text-emerald-700 rounded-lg font-bold flex items-center justify-center gap-2"><Camera /> 相機</button>
+          <button type="button" onClick={() => galleryInputRef.current?.click()} className="flex-1 py-3 bg-slate-100 text-slate-600 rounded-lg font-bold flex items-center justify-center gap-2"><ImageIcon /> 藝廊</button>
+        </div>
+        <input type="file" ref={cameraInputRef} capture="environment" className="hidden" onChange={async (e: any) => { if (e.target.files[0]) setPreviewImages([...previewImages, await resizeImage(e.target.files[0])]) }} />
+        <input type="file" ref={galleryInputRef} multiple className="hidden" onChange={async (e: any) => { for (let f of e.target.files) { setPreviewImages(prev => [...prev, ""]); const url = await resizeImage(f); setPreviewImages(prev => [...prev.slice(0, -1), url]); } }} />
+        {previewImages.length > 0 && (
+          <div className="grid grid-cols-4 gap-2 mt-4">
+            {previewImages.map((s, i) => s && <img key={i} src={s} className="w-full aspect-square object-cover rounded-lg border" />)}
+          </div>
+        )}
+      </div>
+
+      <button type="submit" disabled={loading} className="w-full py-4 bg-emerald-600 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2">
+        {loading ? <><Loader2 className="animate-spin" /> {loadingText}</> : <><Save /> 提交快篩資料</>}
+      </button>
+    </form>
+  );
+};
+
+// 3. Admin/Gov Dashboard
+const Dashboard = ({ user }: { user: User }) => {
+  const [data, setData] = useState<ScreeningData[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<FilterState>({ city: '', dateStart: '', dateEnd: '', address: '', recordId: '', personnel: '' });
+  const [sort, setSort] = useState<SortState>({ field: 'recordId', direction: 'desc' });
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const q = collection(db, 'artifacts', appId, 'public', 'data', 'screenings');
+    return onSnapshot(q, (snap) => {
+      const fetched = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as ScreeningData));
+      fetched.sort((a, b) => (b.createdAt?.toMillis?.() || 0) - (a.createdAt?.toMillis?.() || 0));
+      setData(fetched);
+      setLoading(false);
+    });
+  }, []);
+
+  const filteredData = useMemo(() => {
+    let res = data.filter(d => (!filter.city || d.cityCode === filter.city) && (!filter.recordId || d.recordId.includes(filter.recordId)));
+    res.sort((a, b) => {
+      let vA = a[sort.field]; let vB = b[sort.field];
+      return sort.direction === 'asc' ? (vA > vB ? 1 : -1) : (vA < vB ? 1 : -1);
+    });
+    return res;
+  }, [data, filter, sort]);
+
+  if (loading) return <div className="p-10 text-center text-slate-400">載入雲端數據中...</div>;
+
+  return (
+    <div className="space-y-4 pb-20">
+      {selectedImage && <div className="fixed inset-0 z-[200] bg-black flex items-center justify-center p-4" onClick={() => setSelectedImage(null)}><img src={selectedImage} className="max-w-full max-h-full rounded-xl" /></div>}
+      
+      <div className="bg-emerald-600 text-white p-6 rounded-2xl mb-4 shadow-lg">
+        <h2 className="text-xl font-bold">快篩數據中心</h2>
+        <div className="grid grid-cols-2 gap-4 mt-4">
+           <div className="bg-white/20 p-3 rounded-xl border border-white/30"><div className="text-xs opacity-80">總實際撿拾</div><div className="text-2xl font-bold">{data.reduce((s, i) => s + (i.actualPickedCount || 0), 0)}</div></div>
+           <div className="bg-white/20 p-3 rounded-xl border border-white/30"><div className="text-xs opacity-80">回報筆數</div><div className="text-2xl font-bold">{data.length}</div></div>
+        </div>
+      </div>
+
+      <FilterSortBar filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} onReset={() => setFilter({ city: '', dateStart: '', dateEnd: '', address: '', recordId: '', personnel: '' })} />
+
+      <div className="space-y-4">
+        {filteredData.map(record => (
+          <div key={record.id} className="bg-white p-4 rounded-xl border shadow-sm">
+            <div className="flex justify-between items-start mb-2">
+               <span className="font-mono text-xs font-bold bg-slate-100 px-2 py-1 rounded">{record.recordId}</span>
+               <span className="text-xs text-slate-400">{record.date}</span>
+            </div>
+            <div className="text-sm text-slate-700 mb-3 flex items-center gap-1"><MapPin size={14} className="text-slate-400" /> {record.startAddress}</div>
+            
+            {record.path && record.path.length > 0 && (
+              <div className="mb-3">
+                 <LeafletMap path={record.path} height="120px" />
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 text-center text-xs">
+              <div className="bg-blue-50 p-2 rounded-lg"><div className="text-slate-400">實際</div><div className="font-bold text-blue-600">{record.actualPickedCount}</div></div>
+              <div className="bg-emerald-50 p-2 rounded-lg"><div className="text-slate-400">估計</div><div className="font-bold text-emerald-600">{record.screenedCount}</div></div>
+            </div>
+
+            {record.images && record.images.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto mt-3 pb-1">
+                {record.images.map((img, i) => <img key={i} src={img} onClick={() => setSelectedImage(img)} className="h-14 w-14 object-cover rounded-lg flex-shrink-0 border" />)}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// 4. Admin Panel
+const AdminPanel = ({ user }: { user: User }) => {
+    const [isLoggedIn, setIsLoggedIn] = useState(false);
+    const [password, setPassword] = useState('');
+    const handleLogin = (e: any) => { e.preventDefault(); if (password === '20120507') setIsLoggedIn(true); else alert("密碼錯誤"); };
+    
+    if (!isLoggedIn) return (
+      <div className="py-20 flex flex-col items-center">
+        <div className="bg-white p-8 rounded-2xl shadow-lg w-full max-w-xs text-center border">
+           <Lock className="w-12 h-12 text-blue-600 mx-auto mb-4" />
+           <h2 className="text-xl font-bold mb-4">管理登入</h2>
+           <form onSubmit={handleLogin} className="space-y-4">
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="請輸入密碼" className="w-full p-3 bg-slate-50 border rounded-lg outline-none" />
+              <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg">登入系統</button>
+           </form>
+        </div>
+      </div>
+    );
+
+    return (
+      <div className="pb-20">
+        <div className="bg-slate-800 text-white p-6 rounded-2xl mb-6 shadow-lg flex justify-between items-center">
+           <div><h2 className="text-xl font-bold">系統管理後台</h2><p className="text-xs opacity-60">數據維護模式</p></div>
+           <button onClick={() => setIsLoggedIn(false)} className="p-2 bg-slate-700 rounded-lg"><LogOut size={18} /></button>
+        </div>
+        <p className="text-center text-slate-400 text-sm">數據管理與進階功能開發中...</p>
+      </div>
+    );
+};
+
+// 5. Main App Component
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [activeTab, setActiveTab] = useState<'form' | 'dashboard' | 'admin'>('form');
+  const [hasStarted, setHasStarted] = useState(false);
+
+  useEffect(() => {
+    injectLeafletAssets();
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  if (!hasStarted) return <LoginScreen onLogin={() => setHasStarted(true)} />;
+  if (!user) return <div className="min-h-screen flex items-center justify-center text-slate-400 bg-slate-50">載入中...</div>;
+
+  return (
+    <div className="max-w-md mx-auto min-h-screen bg-slate-50 font-sans shadow-2xl relative border-x">
+      <div className="bg-white border-b sticky top-0 z-30 px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <img src={LOGO_URL} alt="Logo" className="w-8 h-8 object-contain rounded-full border" onError={(e:any) => e.target.style.display='none'} />
+          <h1 className="font-bold text-slate-800">菸蒂快篩</h1>
+        </div>
+        <div className="flex bg-slate-100 p-1 rounded-lg">
+          <button onClick={() => setActiveTab('form')} className={`px-2 py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'form' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>填報</button>
+          <button onClick={() => setActiveTab('dashboard')} className={`px-2 py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'dashboard' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>數據</button>
+          <button onClick={() => setActiveTab('admin')} className={`px-2 py-1.5 text-xs font-bold rounded-md transition-all ${activeTab === 'admin' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-500'}`}>管理</button>
+        </div>
+      </div>
+      <div className="p-4">
+        {activeTab === 'form' && <ScreeningForm user={user} onSubmitSuccess={() => setActiveTab('dashboard')} />}
+        {activeTab === 'dashboard' && <Dashboard user={user} />}
+        {activeTab === 'admin' && <AdminPanel user={user} />}
+      </div>
+    </div>
+  );
+}
